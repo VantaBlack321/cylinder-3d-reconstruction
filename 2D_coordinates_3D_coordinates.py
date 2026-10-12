@@ -1,6 +1,7 @@
 import cv2
 import math
 import numpy as np
+import os
 
 # 2. Dimensions and physical constants
 img_width = 3024
@@ -32,16 +33,8 @@ viewing_directions = []
 # Dictionary to look up specific points by letter: P, Q, R, S
 points_dict = {}
 
-# After four clicks, have:
-# points_dict["P"]["d_hat"] → P's normalized direction
-# points_dict["Q"]["d_hat"] → Q's normalized direction
-# points_dict["R"]["d_hat"] → R's normalized direction
-# points_dict["S"]["d_hat"] → S's normalized direction
-
 measurement_labels = ['m_0', 'm_1', 'm_2', 'm_3']
-
 measurement_coordinates = []
-
 axial_positions = [40.0, 35.0, 30.0, 25.0]  # cm
 
 # Camera Matrix
@@ -53,50 +46,16 @@ K = np.array([
 
 # Camera Ray
 # P(t) = C + td
-
 C = np.array([
     [0],
     [0],
     [0]
 ])
 
-# Cylinder pose still to determine:
-#
-# A = one known/estimated point on cylinder center axis
-# a_hat = unit direction vector of cylinder axis
-#
-# Determine A and a_hat using:
-# - radius = 4.25 cm
-# - longitudinal reference lines
-# - known 5-cm markings
-#
-# Do NOT estimate cylinder pose from P, Q, R, S.
-
 reference_spacing = 5.0  # cm
-
-# For two consecutive points on the same longitudinal reference line:
-#
-# M_i     = t_i * d_hat_i
-# M_next  = t_next * d_hat_next
-#
-# M_i - M_next = reference_spacing * a_hat
-#
-# Therefore:
-# t_i * d_hat_i - t_next * d_hat_next
-#     = reference_spacing * a_hat
-
-# Known physical constraint:
-# ||M_1 - M_0|| = reference_spacing
-
-# Cylinder center axis:
-# L(s) = A + s * a_hat
-# A     = a 3D point on the cylinder center axis
-# a_hat = unit direction vector of the cylinder center axis
-# s     = parameter that moves along the cylinder axis
 
 def mouse_click_callback(event, u, v, flags, param):
     """Callback function triggered on mouse events."""
-    # Only capture up to 8 points (m_0..m_3, P..S)
     if event == cv2.EVENT_LBUTTONDOWN and len(clicked_coordinates) < len(labels):
         idx = len(clicked_coordinates)
         letter = labels[idx]
@@ -155,11 +114,15 @@ def mouse_click_callback(event, u, v, flags, param):
             print("\n>>> Reference points m_0 to m_3 recorded!")
             print(">>> Now click the 4 corners of Box 1 (P -> Q -> R -> S in order)...\n")
 
-image_path = '/Users/ryanmondong/Desktop/IMG_2667.JPG'
+# Use current Downloads path directly
+image_path = os.path.expanduser('~/Downloads/cylinder-3d-reconstruction/IMG_2667.JPG')
+if not os.path.exists(image_path):
+    image_path = os.path.expanduser('~/Downloads/IMG_2667.JPG')
+
 original_img = cv2.imread(image_path)
 
 if original_img is None:
-    print("Error: Could not load image. Check the file path.")
+    print(f"Error: Could not load image from {image_path}. Check the file path.")
 else:
     display_img = original_img.copy()
 
@@ -167,7 +130,6 @@ else:
     cv2.setMouseCallback("Image Window", mouse_click_callback)
     cv2.imshow("Image Window", display_img)
 
-    # print("Click on the image to store coordinates (P, Q, R, S). Press 'ESC' or 'q' to exit.")
     print("Click known 5-cm reference markings m_0, m_1, m_2, m_3. Press 'ESC' or 'q' to exit.")
 
     while True:
@@ -186,10 +148,10 @@ else:
     d3 = points_dict['m_3']['d_hat'].flatten()
 
     B1 = np.column_stack((
-    d0,
-    -2 * d1,
-    d2,
-    np.zeros(3)
+        d0,
+        -2 * d1,
+        d2,
+        np.zeros(3)
     ))
 
     B2 = np.column_stack((
@@ -203,11 +165,8 @@ else:
 
     # Solve for relative depths using SVD
     U, S, Vt = np.linalg.svd(B)
-
     t_relative = Vt[-1]
 
-    # SVD can return the same solution with either sign.
-    # Camera points should be in front of the camera.
     if np.mean(t_relative) < 0:
         t_relative = -t_relative
 
@@ -265,39 +224,27 @@ else:
     v_axis = np.cross(a_hat, u_axis)
 
     def intersect_ray_cylinder(d_hat, A_anchor, a_hat_dir, R_cyl):
-        """Calculates the 3D surface intersection for a camera ray."""
-        v = np.cross(d_hat, a_hat_dir)
-        w = np.cross(-A_anchor, a_hat_dir)
+            """Calculates the 3D surface intersection for a camera ray."""
+            v = np.cross(d_hat, a_hat_dir)
+            w = np.cross(-A_anchor, a_hat_dir)
 
-        c2 = np.dot(v, v)
-        c1 = 2.0 * np.dot(v, w)
-        c0 = np.dot(w, w) - (R_cyl ** 2)
+            c2 = np.dot(v, v)
+            c1 = 2.0 * np.dot(v, w)
+            c0 = np.dot(w, w) - (R_cyl ** 2)
 
-        discriminant = c1**2 - 4.0 * c2 * c0
-        if discriminant < 0:
-            raise ValueError("Ray does not intersect cylinder.")
+            discriminant = c1**2 - 4.0 * c2 * c0
+            if discriminant < 0:
+                raise ValueError("Ray does not intersect cylinder.")
 
-        t1 = (-c1 - np.sqrt(discriminant)) / (2.0 * c2)
-        t2 = (-c1 + np.sqrt(discriminant)) / (2.0 * c2)
+            t1 = (-c1 - np.sqrt(discriminant)) / (2.0 * c2)
+            t2 = (-c1 + np.sqrt(discriminant)) / (2.0 * c2)
 
-        # Find the positive root that stays inside the physical pipe bounds
-        candidates = []
-        for t in (t1, t2):
-            if t > 0:
-                pt = t * d_hat
-                z_axial = np.dot(pt - A_anchor, a_hat_dir)
-                if 0.0 <= z_axial <= pipe_length:
-                    candidates.append((t, pt))
-
-        if candidates:
-            # Pick the farther root inside bounds (inner visible surface looking down the pipe)
-            return candidates[-1][1]
-
-        # Fallback if manual click sits slightly past the boundary rim
-        t_pos = [t for t in (t1, t2) if t > 0]
-        if not t_pos:
-            raise ValueError("No positive intersection found along camera ray.")
-        return min(t_pos) * d_hat
+            # For interior surface viewing from the camera aperture, take the smaller positive root
+            t_pos = [t for t in (t1, t2) if t > 0]
+            if not t_pos:
+                raise ValueError("No positive intersection found along camera ray.")
+            
+            return min(t_pos) * d_hat
 
     # Target patch reconstruction from live user clicks (P, Q, R, S)
     patch_3d = {}
@@ -334,17 +281,14 @@ else:
     z_pts = sorted_pts[:, 1]
     calc_area = 0.5 * np.abs(np.dot(s_pts, np.roll(z_pts, 1)) - np.dot(z_pts, np.roll(s_pts, 1)))
 
-    # Ground truth comparison from Notion for Box I (9.3 cm * 6.9 cm) = 64.2
-    # Ground truth comparison from Notion for Box II (5.8 cm * 12.5 cm) = 72.5
-    # Ground truth comparison from Notion for Box III (11.4 cm * 6 cm) = 68.4
     # Compute Reconstructed Dimensions from unwrapped coordinates (s, z)
     s_vals = pts_2d[:, 0]
     z_vals = pts_2d[:, 1]
-    recon_width = np.max(s_vals) - np.min(s_vals)
-    recon_height = np.max(z_vals) - np.min(z_vals)
+    # True physical edges: circumferential span (P to S) and axial depth (P to Q)
+    recon_width = abs(patch_unwrapped['S'][0] - patch_unwrapped['P'][0])
+    recon_height = abs(patch_unwrapped['Q'][1] - patch_unwrapped['P'][1])
     recon_rect_area = recon_width * recon_height
 
-    # Ground truth targets for Box I (Change to Box II or III when testing)
     actual_width = 9.30
     actual_height = 6.90
     actual_area_cm2 = 64.20

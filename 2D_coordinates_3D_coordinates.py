@@ -289,9 +289,9 @@ else:
     recon_height = abs(patch_unwrapped['Q'][1] - patch_unwrapped['P'][1])
     recon_rect_area = recon_width * recon_height
 
-    actual_width = 9.30
-    actual_height = 6.90
-    actual_area_cm2 = 64.20
+    actual_width = 5.8 
+    actual_height = 12.5
+    actual_area_cm2 = 72.5
 
     print("\n================ Reconstructed Dimensions & Area ================")
     print(f"Reconstructed Arc Width (s) : {recon_width:6.2f} cm | Actual: {actual_width:6.2f} cm | Error: {abs(recon_width - actual_width):.2f} cm ({(abs(recon_width - actual_width)/actual_width)*100:.2f}%)")

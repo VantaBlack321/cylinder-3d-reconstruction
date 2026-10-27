@@ -141,6 +141,24 @@ else:
 
     print(f"\nSession finished. Total coordinates captured: {len(clicked_coordinates)}")
 
+    # Fallback to stored clicks if ESC was pressed directly
+    if len(clicked_coordinates) < 8:
+        print("Using stored points...")
+        fallback_clicks = {
+            'm_0': (1208, 1349), 'm_1': (1290, 1686), 'm_2': (1350, 1980), 'm_3': (1395, 2220),
+            'P': (1031, 2114), 'Q': (1154, 2206), 'R': (1341, 2589), 'S': (1290, 2652)
+        }
+        for lbl in labels:
+            u, v = fallback_clicks[lbl]
+            p = np.array([[u], [v], [1]], dtype=np.float64)
+            d = np.linalg.solve(K, p)
+            points_dict[lbl] = {
+                "pixel": (u, v),
+                "homogeneous": p,
+                "viewing_direction": d,
+                "d_hat": d / np.linalg.norm(d)
+            }
+
     # Get normalized viewing directions after all 4 points have been clicked
     d0 = points_dict['m_0']['d_hat'].flatten()
     d1 = points_dict['m_1']['d_hat'].flatten()
@@ -203,15 +221,17 @@ else:
     for idx, M in enumerate(M_points):
         print(f"M_{idx}: X={M[0]:.2f}, Y={M[1]:.2f}, Z={M[2]:.2f}")
 
-    print("\n================ Cylinder Axis Direction (a_hat) ===========")
-    print(f"a_hat: [{a_hat[0]:.4f}, {a_hat[1]:.4f}, {a_hat[2]:.4f}]")
-
     # 4. Calibration vs Independent Validation Verification
     print("\n================ Calibration vs Validation ================")
     print(f"Calibration Scale Baseline (||M1 - M0||) : {np.linalg.norm(M1 - M0):.2f} cm (Enforced)")
     print(f"Independent Validation 1   (||M2 - M1||) : {np.linalg.norm(M2 - M1):.2f} cm (Target: 5.00 cm)")
     print(f"Independent Validation 2   (||M3 - M2||) : {np.linalg.norm(M3 - M2):.2f} cm (Target: 5.00 cm)")
     print(f"Independent Total Span     (||M3 - M0||) : {np.linalg.norm(M3 - M0):.2f} cm (Target: 15.00 cm)")
+
+    # Test isolated pose estimation using strictly M0 and M1
+    axis_m0_m1 = M1 - M0
+    a_hat_isolated = axis_m0_m1 / np.linalg.norm(axis_m0_m1)
+    print(f"Isolated Axis from M0->M1 only          : [{a_hat_isolated[0]:.4f}, {a_hat_isolated[1]:.4f}, {a_hat_isolated[2]:.4f}]")
 
     # ========================================================
     # Next Step: Ray-Cylinder Intersection & Patch Unwrapping
@@ -224,27 +244,28 @@ else:
     v_axis = np.cross(a_hat, u_axis)
 
     def intersect_ray_cylinder(d_hat, A_anchor, a_hat_dir, R_cyl):
-            """Calculates the 3D surface intersection for a camera ray."""
-            v = np.cross(d_hat, a_hat_dir)
-            w = np.cross(-A_anchor, a_hat_dir)
+        """Calculates the 3D surface intersection for a camera ray."""
+        v = np.cross(d_hat, a_hat_dir)
+        w = np.cross(-A_anchor, a_hat_dir)
 
-            c2 = np.dot(v, v)
-            c1 = 2.0 * np.dot(v, w)
-            c0 = np.dot(w, w) - (R_cyl ** 2)
+        c2 = np.dot(v, v)
+        c1 = 2.0 * np.dot(v, w)
+        c0 = np.dot(w, w) - (R_cyl ** 2)
 
-            discriminant = c1**2 - 4.0 * c2 * c0
-            if discriminant < 0:
-                raise ValueError("Ray does not intersect cylinder.")
+        discriminant = c1**2 - 4.0 * c2 * c0
+        if discriminant < 0:
+            return None, discriminant, None
 
-            t1 = (-c1 - np.sqrt(discriminant)) / (2.0 * c2)
-            t2 = (-c1 + np.sqrt(discriminant)) / (2.0 * c2)
+        t1 = (-c1 - np.sqrt(discriminant)) / (2.0 * c2)
+        t2 = (-c1 + np.sqrt(discriminant)) / (2.0 * c2)
 
-            # For interior surface viewing from the camera aperture, take the smaller positive root
-            t_pos = [t for t in (t1, t2) if t > 0]
-            if not t_pos:
-                raise ValueError("No positive intersection found along camera ray.")
-            
-            return min(t_pos) * d_hat
+        # For interior surface viewing from the camera aperture, take the smaller positive root
+        t_pos = [t for t in (t1, t2) if t > 0]
+        if not t_pos:
+            return None, discriminant, None
+        
+        t_chosen = min(t_pos)
+        return t_chosen * d_hat, discriminant, t_chosen
 
     # Target patch reconstruction from live user clicks (P, Q, R, S)
     patch_3d = {}
@@ -255,13 +276,14 @@ else:
         d_hat = points_dict[label]['d_hat'].flatten()
 
         # 1. 3D point on cylinder surface
-        P_xyz = intersect_ray_cylinder(d_hat, A, a_hat, radius)
+        P_xyz, disc_val, t_val = intersect_ray_cylinder(d_hat, A, a_hat, radius)
         patch_3d[label] = P_xyz
 
         # 2. Convert to cylindrical coordinates (s = R * theta, z)
+        # Shift z origin relative to M0 (pipe opening) so z matches pipe physical length
         rel_vec = P_xyz - A
-        z_axial = np.dot(rel_vec, a_hat)
-        radial_proj = rel_vec - z_axial * a_hat
+        z_axial = np.dot(P_xyz - M0, a_hat)
+        radial_proj = rel_vec - np.dot(rel_vec, a_hat) * a_hat
         theta = np.arctan2(np.dot(radial_proj, v_axis), np.dot(radial_proj, u_axis))
         s_arc = radius * theta
 
@@ -282,9 +304,6 @@ else:
     calc_area = 0.5 * np.abs(np.dot(s_pts, np.roll(z_pts, 1)) - np.dot(z_pts, np.roll(s_pts, 1)))
 
     # Compute Reconstructed Dimensions from unwrapped coordinates (s, z)
-    s_vals = pts_2d[:, 0]
-    z_vals = pts_2d[:, 1]
-    # True physical edges: circumferential span (P to S) and axial depth (P to Q)
     recon_width = abs(patch_unwrapped['S'][0] - patch_unwrapped['P'][0])
     recon_height = abs(patch_unwrapped['Q'][1] - patch_unwrapped['P'][1])
     recon_rect_area = recon_width * recon_height
@@ -300,6 +319,48 @@ else:
     print(f"Shoelace Polygon Area       : {calc_area:6.2f} cm² | Actual: {actual_area_cm2:6.2f} cm² | Error: {abs(calc_area - actual_area_cm2):.2f} cm² ({(abs(calc_area - actual_area_cm2)/actual_area_cm2)*100:.2f}%)")
 
     # ========================================================
+    # Point R Sensitivity Sweep (+-1, +-2, +-5 pixels)
+    # ========================================================
+    print("\n================ Point R Sensitivity Sweep ================")
+    print(f"{'Offset':<10} | {'Disc (b²-4ac)':<14} | {'t (cm)':<8} | {'z (cm)':<8} | {'Area (cm²)':<10} | {'Area Error'}")
+    print("-" * 68)
+
+    base_u, base_v = points_dict['R']['pixel']
+    shifts = [
+        ('Base', 0, 0),
+        ('u + 1', 1, 0), ('u - 1', -1, 0),
+        ('u + 2', 2, 0), ('u - 2', -2, 0),
+        ('u + 5', 5, 0), ('u - 5', -5, 0),
+        ('v + 1', 0, 1), ('v - 1', 0, -1),
+        ('v + 2', 0, 2), ('v - 2', 0, -2),
+        ('v + 5', 0, 5), ('v - 5', 0, -5),
+    ]
+
+    for name, du, dv in shifts:
+        p_sweep = np.array([[base_u + du], [base_v + dv], [1]], dtype=np.float64)
+        d_sweep = np.linalg.solve(K, p_sweep)
+        d_sweep_hat = (d_sweep / np.linalg.norm(d_sweep)).flatten()
+
+        pt_sweep, d_val, t_val = intersect_ray_cylinder(d_sweep_hat, A, a_hat, radius)
+        if pt_sweep is not None:
+            rel = pt_sweep - A
+            z_sw = np.dot(pt_sweep - M0, a_hat)
+            rad_p = rel - np.dot(rel, a_hat) * a_hat
+            th_sw = np.arctan2(np.dot(rad_p, v_axis), np.dot(rad_p, u_axis))
+            s_sw = radius * th_sw
+
+            # recalculate polygon area with shifted R
+            sweep_pts = np.array([patch_unwrapped['P'], patch_unwrapped['Q'], (s_arc, z_axial), patch_unwrapped['S']])
+            sweep_pts[2] = (s_sw, z_sw)
+            c_sw = np.mean(sweep_pts, axis=0)
+            ang_sw = np.arctan2(sweep_pts[:, 1] - c_sw[1], sweep_pts[:, 0] - c_sw[0])
+            sorted_sw = sweep_pts[np.argsort(ang_sw)]
+            sw_area = 0.5 * np.abs(np.dot(sorted_sw[:, 0], np.roll(sorted_sw[:, 1], 1)) - np.dot(sorted_sw[:, 1], np.roll(sorted_sw[:, 0], 1)))
+            sw_err = abs(sw_area - actual_area_cm2) / actual_area_cm2 * 100
+
+            print(f"{name:<10} | {d_val:<14.4e} | {t_val:<8.2f} | {z_sw:<8.2f} | {sw_area:<10.2f} | {sw_err:.2f}%")
+
+    # ========================================================
     # Save Figures for Report / Advisor Deliverables
     # ========================================================
     import matplotlib.pyplot as plt
@@ -311,7 +372,7 @@ else:
     plt.fill(patch_poly[:, 0], patch_poly[:, 1], 'red', alpha=0.15)
 
     # Plot the reference line (s = 0)
-    ref_z = [np.dot(M - A, a_hat) for M in M_points]
+    ref_z = [np.dot(M - M0, a_hat) for M in M_points]
     plt.plot([0]*4, ref_z, 'b--s', label='5-cm Axis Markers')
 
     for lbl in ['P', 'Q', 'R', 'S']:

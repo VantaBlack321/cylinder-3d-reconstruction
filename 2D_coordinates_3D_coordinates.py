@@ -113,6 +113,15 @@ def mouse_click_callback(event, u, v, flags, param):
         if len(clicked_coordinates) == 4:
             print("\n>>> Reference points m_0 to m_3 recorded!")
             print(">>> Now click the 4 corners of Box 1 (P -> Q -> R -> S in order)...\n")
+    elif event == cv2.EVENT_MOUSEMOVE:
+        hover_img = display_img.copy()
+        # Draw live crosshair
+        cv2.line(hover_img, (u - 25, v), (u + 25, v), (255, 255, 0), 2)
+        cv2.line(hover_img, (u, v - 25), (u, v + 25), (255, 255, 0), 2)
+        # Draw live (U, V) coordinates near cursor
+        cv2.putText(hover_img, f"({u}, {v})", (u + 30, v + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 255, 0), 2, cv2.LINE_AA)
+        cv2.imshow("Image Window", hover_img)
 
 # Use current Downloads path directly
 image_path = os.path.expanduser('~/Downloads/cylinder-3d-reconstruction/IMG_2667.JPG')
@@ -283,6 +292,10 @@ else:
         # Shift z origin relative to M0 (pipe opening) so z matches pipe physical length
         rel_vec = P_xyz - A
         z_axial = np.dot(P_xyz - M0, a_hat)
+        if z_axial > pipe_length or z_axial < 0:
+            print(f"[WARNING] {label} axial depth ({z_axial:.2f} cm) exceeds physical pipe boundary (0–{pipe_length} cm). Clamping to boundary.")
+            z_axial = np.clip(z_axial, 0.0, pipe_length)
+
         radial_proj = rel_vec - np.dot(rel_vec, a_hat) * a_hat
         theta = np.arctan2(np.dot(radial_proj, v_axis), np.dot(radial_proj, u_axis))
         s_arc = radius * theta
